@@ -3,7 +3,7 @@ package systray
 import (
 	"testing"
 
-	"github.com/gogpu/systray/internal"
+	"github.com/nange/systray/internal"
 )
 
 // newTestTray creates a SystemTray backed by a mock platform for testing.

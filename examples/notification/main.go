@@ -14,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/gogpu/systray"
+	"github.com/nange/systray"
 )
 
 func main() {

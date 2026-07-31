@@ -1,7 +1,7 @@
 package systray
 
 import (
-	"github.com/gogpu/systray/internal"
+	"github.com/nange/systray/internal"
 )
 
 // MenuItemType identifies the kind of menu item.

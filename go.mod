@@ -1,4 +1,4 @@
-module github.com/gogpu/systray
+module github.com/nange/systray
 
 go 1.25.0
 

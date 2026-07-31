@@ -1,7 +1,7 @@
 package systray
 
 import (
-	"github.com/gogpu/systray/internal"
+	"github.com/nange/systray/internal"
 )
 
 // TrayID uniquely identifies a system tray icon. Zero is invalid.

@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-webgpu/goffi/ffi"
 
-	"github.com/gogpu/systray/internal/darwin"
+	"github.com/nange/systray/internal/darwin"
 )
 
 // NSVariableStatusItemLength tells NSStatusBar to size the item to fit its content.
