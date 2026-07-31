@@ -60,6 +60,7 @@ const (
 	wmContextMenu   = 0x007B
 	wmNull          = 0x0000
 	wmCommand       = 0x0111
+	wmClose         = 0x0010
 	wmDestroy       = 0x0002
 	wmSettingChange = 0x001A
 )
@@ -124,6 +125,7 @@ var (
 	procCreateWindowExW             = user32.NewProc("CreateWindowExW")
 	procDestroyWindow               = user32.NewProc("DestroyWindow")
 	procDefWindowProcW              = user32.NewProc("DefWindowProcW")
+	procPostQuitMessage             = user32.NewProc("PostQuitMessage")
 	procSetForegroundWindow         = user32.NewProc("SetForegroundWindow")
 	procTrackPopupMenu              = user32.NewProc("TrackPopupMenu")
 	procPostMessageW                = user32.NewProc("PostMessageW")
@@ -622,7 +624,13 @@ func (t *win32Tray) Run() error {
 	}
 }
 
-// Destroy removes the tray icon, destroys the window, and frees resources.
+// Destroy removes the tray icon and schedules window teardown.
+// DestroyWindow must run on the message-loop thread, so we post WM_CLOSE
+// to the tray window; the WndProc handles destruction and posts WM_QUIT
+// to end the Run() message loop. The tray registry entry is removed in
+// the wmDestroy handler, AFTER the window procedure has resolved this
+// instance for WM_CLOSE (removing it earlier would route WM_CLOSE to
+// DefWindowProc and the message loop would never exit).
 func (t *win32Tray) Destroy() {
 	// Remove icon from tray.
 	if t.visible {
@@ -631,32 +639,10 @@ func (t *win32Tray) Destroy() {
 		}
 	}
 
-	// Unregister from the global registry.
+	// Schedule window destruction on the message-loop thread.
 	if t.hwnd != 0 {
-		trayMu.Lock()
-		delete(trayRegistry, t.hwnd)
-		trayMu.Unlock()
-
-		if ret, _, _ := procDestroyWindow.Call(t.hwnd); ret == 0 {
-			slog.Warn("systray: DestroyWindow failed during cleanup")
-		}
+		_, _, _ = procPostMessageW.Call(t.hwnd, wmClose, 0, 0)
 		t.hwnd = 0
-	}
-
-	// Free HICON.
-	if t.hicon != 0 {
-		if ret, _, _ := procDestroyIcon.Call(t.hicon); ret == 0 {
-			slog.Warn("systray: DestroyIcon failed during cleanup")
-		}
-		t.hicon = 0
-	}
-
-	// Free HMENU.
-	if t.hmenu != 0 {
-		if ret, _, _ := procDestroyMenu.Call(t.hmenu); ret == 0 {
-			slog.Warn("systray: DestroyMenu failed during cleanup")
-		}
-		t.hmenu = 0
 	}
 }
 
@@ -924,7 +910,26 @@ func trayWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		ret, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
 		return ret
 
+	case wmClose:
+		ret, _, _ := procDestroyWindow.Call(hwnd, 0, 0)
+		return ret
+
 	case wmDestroy:
+		// DestroyWindow runs on the message-loop thread; release icon and
+		// menu resources, drop the registry entry, and post WM_QUIT so
+		// Run() returns.
+		if t.hicon != 0 {
+			_, _, _ = procDestroyIcon.Call(t.hicon)
+			t.hicon = 0
+		}
+		if t.hmenu != 0 {
+			_, _, _ = procDestroyMenu.Call(t.hmenu)
+			t.hmenu = 0
+		}
+		trayMu.Lock()
+		delete(trayRegistry, hwnd)
+		trayMu.Unlock()
+		_, _, _ = procPostQuitMessage.Call(0)
 		return 0
 
 	default:
