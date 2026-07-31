@@ -255,8 +255,9 @@ type win32Tray struct {
 	tooltip  string  // stored tooltip for explorer crash recovery
 
 	callbacks *Callbacks
-	menu      *Menu             // stored menu for rebuilding HMENU and dispatch
-	itemIDs   map[uint32]uint32 // MenuItem.ID() -> HMENU command ID (UINT) for UpdateItem
+	menu      *Menu                // stored menu for rebuilding HMENU and dispatch
+	itemIDs   map[uint32]uint32    // MenuItem.ID() -> HMENU command ID (UINT) for UpdateItem
+	cmdItems  map[uint32]*MenuItem // HMENU command ID -> MenuItem for click dispatch
 }
 
 // NewPlatformTray creates a Win32 system tray implementation.
@@ -442,6 +443,7 @@ func (t *win32Tray) SetTooltip(text string) error {
 func (t *win32Tray) SetMenu(menu *Menu) error {
 	t.menu = menu
 	t.itemIDs = make(map[uint32]uint32)
+	t.cmdItems = make(map[uint32]*MenuItem)
 
 	// Destroy old HMENU if any.
 	if t.hmenu != 0 {
@@ -452,7 +454,8 @@ func (t *win32Tray) SetMenu(menu *Menu) error {
 	}
 
 	if menu != nil && len(menu.Items) > 0 {
-		hmenu, err := buildHMENU(menu, t.itemIDs)
+		var nextID uint32
+		hmenu, err := buildHMENU(menu, t.itemIDs, t.cmdItems, &nextID)
 		if err != nil {
 			return fmt.Errorf("build HMENU: %w", err)
 		}
@@ -724,16 +727,18 @@ func (t *win32Tray) reAddIcon() {
 // --- Menu construction ---
 
 // buildHMENU creates a Win32 HMENU from the internal Menu structure.
-// Menu item IDs are 1-based sequential (0 is reserved for "no selection"
-// in TrackPopupMenu with TPM_RETURNCMD).
-// itemIDs maps MenuItem.ID() to the Win32 command ID for UpdateItem.
-func buildHMENU(menu *Menu, itemIDs map[uint32]uint32) (uintptr, error) {
+// Menu item IDs are assigned from a global counter shared across the whole
+// menu tree, so submenu items get unique IDs (TrackPopupMenu with
+// TPM_RETURNCMD returns the ID of the clicked item in whatever submenu).
+// itemIDs maps MenuItem.ID() to the Win32 command ID for UpdateItem;
+// cmdItems maps the Win32 command ID back to the MenuItem for dispatch.
+func buildHMENU(menu *Menu, itemIDs map[uint32]uint32, cmdItems map[uint32]*MenuItem, nextID *uint32) (uintptr, error) {
 	hmenu, _, _ := procCreatePopupMenu.Call()
 	if hmenu == 0 {
 		return 0, fmt.Errorf("CreatePopupMenu failed")
 	}
 
-	if err := populateMenu(hmenu, menu, itemIDs); err != nil {
+	if err := populateMenu(hmenu, menu, itemIDs, cmdItems, nextID); err != nil {
 		if ret, _, _ := procDestroyMenu.Call(hmenu); ret == 0 {
 			slog.Warn("systray: DestroyMenu failed during error cleanup")
 		}
@@ -744,10 +749,10 @@ func buildHMENU(menu *Menu, itemIDs map[uint32]uint32) (uintptr, error) {
 }
 
 // populateMenu recursively adds items to an HMENU.
-// Item IDs are assigned sequentially using a global counter that resets
-// when buildHMENU is called. For submenus, items continue the sequence.
-// itemIDs maps MenuItem.ID() to the Win32 command ID.
-func populateMenu(hmenu uintptr, menu *Menu, itemIDs map[uint32]uint32) error {
+// Item IDs come from the shared *nextID counter so they are unique across
+// the entire menu tree, including submenus. itemIDs maps MenuItem.ID() to
+// the Win32 command ID; cmdItems maps the command ID back to the MenuItem.
+func populateMenu(hmenu uintptr, menu *Menu, itemIDs map[uint32]uint32, cmdItems map[uint32]*MenuItem, nextID *uint32) error {
 	for i, item := range menu.Items {
 		switch item.Type {
 		case MenuItemSeparator:
@@ -765,7 +770,7 @@ func populateMenu(hmenu uintptr, menu *Menu, itemIDs map[uint32]uint32) error {
 			if item.Submenu == nil {
 				continue
 			}
-			subHMenu, err := buildHMENU(item.Submenu, itemIDs)
+			subHMenu, err := buildHMENU(item.Submenu, itemIDs, cmdItems, nextID)
 			if err != nil {
 				return fmt.Errorf("build submenu %q: %w", item.Label, err)
 			}
@@ -803,8 +808,9 @@ func populateMenu(hmenu uintptr, menu *Menu, itemIDs map[uint32]uint32) error {
 			if item.Disabled {
 				flags |= mfGrayed
 			}
-			// Item ID is 1-based index (UINT). Cast to uintptr only at syscall boundary.
-			itemID := uint32(i + 1)
+			// Unique ID across the whole menu tree. Cast to uintptr only at syscall boundary.
+			*nextID++
+			itemID := *nextID
 			ret, _, _ := procAppendMenuW.Call(
 				hmenu,
 				flags,
@@ -816,6 +822,9 @@ func populateMenu(hmenu uintptr, menu *Menu, itemIDs map[uint32]uint32) error {
 			}
 			if itemIDs != nil {
 				itemIDs[item.ID()] = itemID
+			}
+			if cmdItems != nil {
+				cmdItems[itemID] = item
 			}
 		}
 	}
@@ -974,11 +983,10 @@ func (t *win32Tray) showContextMenu() {
 	// Return value is non-fatal.
 	_, _, _ = procPostMessageW.Call(t.hwnd, wmNull, 0, 0)
 
-	// Dispatch the selected item (ret is 1-based index from populateMenu).
-	if ret > 0 && t.menu != nil {
-		idx := int(ret) - 1
-		if idx >= 0 && idx < len(t.menu.Items) {
-			item := t.menu.Items[idx]
+	// Dispatch the selected item. TrackPopupMenu returns the command ID,
+	// which is unique across the whole menu tree (including submenus).
+	if ret > 0 {
+		if item := t.cmdItems[uint32(ret)]; item != nil {
 			if item.OnClick != nil {
 				item.OnClick()
 			}
